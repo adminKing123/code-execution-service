@@ -1,5 +1,6 @@
 import platform
-import sys
+
+import config
 
 SUPPORTED = {
     "python": {
@@ -17,7 +18,7 @@ def list_languages() -> list[dict]:
     for lang in SUPPORTED.values():
         item = dict(lang)
         if item["id"] == "python":
-            item["runtime_executable"] = sys.executable
+            item["runtime_executable"] = config.PYTHON_EXECUTABLE
         items.append(item)
     return items
 

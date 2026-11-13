@@ -1,4 +1,6 @@
 import os
+import shutil
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -26,3 +28,19 @@ FLASK_PORT = int(os.getenv("FLASK_PORT", "5001"))
 _database_file = Path(os.getenv("DATABASE_PATH", str(BASE_DIR / "sqlite3.db")))
 DATABASE_PATH = str(_database_file)
 DATABASE_URL = f"sqlite:///{_database_file.as_posix()}"
+
+
+def _resolve_python_executable() -> str:
+    configured = (os.getenv("PYTHON_EXECUTABLE") or "").strip()
+    if configured:
+        return configured
+    exe = sys.executable
+    if os.path.basename(exe).lower().startswith("uwsgi"):
+        for candidate in ("python3", "python"):
+            found = shutil.which(candidate)
+            if found:
+                return found
+    return exe
+
+
+PYTHON_EXECUTABLE = _resolve_python_executable()

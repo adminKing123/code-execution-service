@@ -172,7 +172,29 @@ def build_safe_builtins(*, stdin_lines: Iterable[str]) -> dict:
             continue
         safe[name] = getattr(builtins, name)
     safe["input"] = safe_input
+
+    def safe_import(
+        name: str,
+        globals=None,
+        locals=None,
+        fromlist: tuple = (),
+        level: int = 0,
+    ):
+        if level != 0:
+            raise ImportError("relative imports are not allowed")
+        _check_import_name(name, lineno=None)
+        for item in fromlist or ():
+            _check_import_name(f"{name}.{item}" if name else str(item), lineno=None)
+        return _import_builtin(name, globals, locals, fromlist, level)
+
+    safe["__import__"] = safe_import
     return safe
+
+
+def _import_builtin(name, globals, locals, fromlist, level):
+    import builtins as bi
+
+    return bi.__import__(name, globals, locals, fromlist, level)
 
 
 def safe_globals(*, stdin_lines: Iterable[str] | None = None) -> dict:

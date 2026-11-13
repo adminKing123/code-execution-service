@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import config
 import settings_store
 from languages import get_language
 from python_guardrails import GuardrailViolation, validate_python_source
@@ -126,7 +127,7 @@ def _run_python_subprocess(code: str, *, stdin_lines: list[str] | None = None) -
         stdin_path.write_text(json.dumps(stdin_lines or []), encoding="utf-8")
 
         proc = subprocess.Popen(
-            [sys.executable, str(RUNNER_PATH), str(code_path), str(stdin_path)],
+            [config.PYTHON_EXECUTABLE, str(RUNNER_PATH), str(code_path), str(stdin_path)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -153,6 +154,7 @@ def _run_python_subprocess(code: str, *, stdin_lines: list[str] | None = None) -
         timeout = settings_store.execution_timeout_seconds()
         deadline = time.monotonic() + timeout
         timed_out = False
+        saw_terminal_event = False
 
         while True:
             remaining = deadline - time.monotonic()
@@ -167,7 +169,10 @@ def _run_python_subprocess(code: str, *, stdin_lines: list[str] | None = None) -
                 continue
             if line is None:
                 break
-            yield ("protocol", _parse_protocol_line(line))
+            parsed = _parse_protocol_line(line)
+            if parsed and parsed.get("type") in ("complete", "error"):
+                saw_terminal_event = True
+            yield ("protocol", parsed)
 
         if timed_out:
             proc.kill()
@@ -189,7 +194,23 @@ def _run_python_subprocess(code: str, *, stdin_lines: list[str] | None = None) -
         if proc.stderr is not None:
             stderr_tail = proc.stderr.read() or ""
 
-        if proc.returncode not in (0, 1) and stderr_tail.strip():
+        if not saw_terminal_event:
+            detail_parts = []
+            if stderr_tail.strip():
+                detail_parts.append(stderr_tail.strip())
+            detail_parts.append(
+                f"Child exited with code {proc.returncode} and no completion event "
+                f"(interpreter: {config.PYTHON_EXECUTABLE})"
+            )
+            yield (
+                "runner_crash",
+                {
+                    "error": "runner_failed",
+                    "detail": "\n".join(detail_parts),
+                    "exit_code": proc.returncode,
+                },
+            )
+        elif proc.returncode not in (0, 1) and stderr_tail.strip():
             yield (
                 "runner_crash",
                 {
