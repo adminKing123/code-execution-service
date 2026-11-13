@@ -78,7 +78,10 @@ def finalize_execution_log(
             return
         log.status = "success" if ok else "failed"
         log.has_main = has_main
-        log.result_json = CodeExecutionLog.result_to_json(result) if ok and has_main else None
+        if ok and has_main:
+            log.result_json = CodeExecutionLog.result_to_json(result)
+        else:
+            log.result_json = None
         log.started_at = started_at
         log.ended_at = ended_at
         log.duration_ms = duration_ms

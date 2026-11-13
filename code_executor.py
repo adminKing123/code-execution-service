@@ -8,13 +8,14 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Generator, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import settings_store
 from languages import get_language
+from python_guardrails import GuardrailViolation, validate_python_source
 
 RUNNER_PATH = Path(__file__).resolve().parent / "python_runner.py"
 
@@ -49,10 +50,9 @@ class ExecutionOutcome:
             "ended_at": self.ended_at,
             "duration_ms": self.duration_ms,
         }
-        if self.ok:
-            if self.has_main:
-                body["result"] = self.result
-        else:
+        if self.ok and self.has_main:
+            body["result"] = self.result
+        if not self.ok:
             body["error"] = self.error or "execution_failed"
             if self.error_type:
                 body["error_type"] = self.error_type
@@ -69,7 +69,20 @@ def _utc_request_started() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def validate_execute_request(*, language: str, code: str) -> None:
+def _normalize_stdin_lines(raw) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ExecutionValidationError("stdin_lines must be an array of strings")
+    return [str(item) for item in raw]
+
+
+def validate_execute_request(
+    *,
+    language: str,
+    code: str,
+    stdin_lines: list[str] | None = None,
+) -> None:
     if not get_language(language):
         raise ExecutionValidationError(f"Unsupported language: {language}")
     if not isinstance(code, str) or not code.strip():
@@ -80,6 +93,11 @@ def validate_execute_request(*, language: str, code: str) -> None:
         raise ExecutionValidationError(
             f"code exceeds max size of {max_bytes} bytes ({len(encoded)} bytes)"
         )
+    if language == "python":
+        try:
+            validate_python_source(code)
+        except GuardrailViolation as exc:
+            raise ExecutionValidationError(str(exc)) from exc
 
 
 def _parse_protocol_line(line: str) -> dict | None:
@@ -92,19 +110,23 @@ def _parse_protocol_line(line: str) -> dict | None:
         return {"type": "log", "stream": "stdout", "message": line}
     if not isinstance(payload, dict):
         return {"type": "log", "stream": "stdout", "message": line}
-    return payload
+    if payload.get("type") in ("log", "complete", "error"):
+        return payload
+    return {"type": "log", "stream": "stdout", "message": line}
 
 
-def _run_python_subprocess(code: str) -> Iterable[tuple[str, dict | None]]:
+def _run_python_subprocess(code: str, *, stdin_lines: list[str] | None = None) -> Iterable[tuple[str, dict | None]]:
     """
     Yields ("event", payload) for each protocol message from the child process.
     """
     with tempfile.TemporaryDirectory(prefix="code-exec-") as tmp:
         code_path = Path(tmp) / "user_code.py"
         code_path.write_text(code, encoding="utf-8")
+        stdin_path = Path(tmp) / "stdin_lines.json"
+        stdin_path.write_text(json.dumps(stdin_lines or []), encoding="utf-8")
 
         proc = subprocess.Popen(
-            [sys.executable, str(RUNNER_PATH), str(code_path)],
+            [sys.executable, str(RUNNER_PATH), str(code_path), str(stdin_path)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -178,14 +200,39 @@ def _run_python_subprocess(code: str) -> Iterable[tuple[str, dict | None]]:
             )
 
 
+def _outcome_from_complete(
+    *,
+    language: str,
+    execution_id: str,
+    payload: dict,
+    logs: list[dict],
+    started_at: str,
+) -> ExecutionOutcome:
+    has_main = bool(payload.get("has_main"))
+    result = payload.get("result") if has_main and "result" in payload else None
+    return ExecutionOutcome(
+        ok=True,
+        language=language,
+        execution_id=execution_id,
+        has_main=has_main,
+        result=result if has_main else None,
+        started_at=payload.get("started_at") or started_at,
+        ended_at=payload.get("ended_at"),
+        duration_ms=payload.get("duration_ms"),
+        logs=logs,
+    )
+
+
 def execute_code(
     *,
     language: str,
     code: str,
     execution_id: str | None = None,
+    stdin_lines: list[str] | None = None,
 ) -> ExecutionOutcome:
     execution_id = execution_id or str(uuid.uuid4())
-    validate_execute_request(language=language, code=code)
+    stdin_lines = stdin_lines or []
+    validate_execute_request(language=language, code=code, stdin_lines=stdin_lines)
 
     logs: list[dict] = []
     started_at = _utc_request_started()
@@ -194,27 +241,18 @@ def execute_code(
     has_main: bool | None = None
     result = None
 
-    for kind, payload in _run_python_subprocess(code):
+    for kind, payload in _run_python_subprocess(code, stdin_lines=stdin_lines):
         if kind == "protocol" and payload:
             if payload.get("type") == "log":
                 logs.append(payload)
                 continue
             if payload.get("type") == "complete":
-                has_main = bool(payload.get("has_main"))
-                result = payload.get("result")
-                started_at = payload.get("started_at") or started_at
-                ended_at = payload.get("ended_at")
-                duration_ms = payload.get("duration_ms")
-                return ExecutionOutcome(
-                    ok=True,
+                return _outcome_from_complete(
                     language=language,
                     execution_id=execution_id,
-                    has_main=has_main,
-                    result=result if has_main else None,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    duration_ms=duration_ms,
+                    payload=payload,
                     logs=logs,
+                    started_at=started_at,
                 )
             if payload.get("type") == "error":
                 return ExecutionOutcome(
@@ -270,121 +308,3 @@ def execute_code(
         detail="Runner finished without a completion event",
         logs=logs,
     )
-
-
-def stream_execute_code(
-    *,
-    language: str,
-    code: str,
-    execution_id: str | None = None,
-) -> Generator[dict, None, None]:
-    """
-    Yields SSE payloads:
-      {"event": "started", ...}
-      {"event": "log", ...}
-      {"event": "complete", ...} or {"event": "error", ...}
-    """
-    execution_id = execution_id or str(uuid.uuid4())
-    try:
-        validate_execute_request(language=language, code=code)
-    except ExecutionValidationError as exc:
-        yield {
-            "event": "error",
-            "data": {
-                "ok": False,
-                "execution_id": execution_id,
-                "language": language,
-                "error": str(exc),
-                "error_type": "validation",
-            },
-        }
-        return
-
-    yield {
-        "event": "started",
-        "data": {
-            "execution_id": execution_id,
-            "language": language,
-            "started_at": _utc_request_started(),
-        },
-    }
-
-    for kind, payload in _run_python_subprocess(code):
-        if kind == "protocol" and payload:
-            if payload.get("type") == "log":
-                yield {"event": "log", "data": payload}
-                continue
-            if payload.get("type") == "complete":
-                outcome = ExecutionOutcome(
-                    ok=True,
-                    language=language,
-                    execution_id=execution_id,
-                    has_main=bool(payload.get("has_main")),
-                    result=payload.get("result") if payload.get("has_main") else None,
-                    started_at=payload.get("started_at"),
-                    ended_at=payload.get("ended_at"),
-                    duration_ms=payload.get("duration_ms"),
-                )
-                yield {
-                    "event": "complete",
-                    "data": outcome.to_response_dict(include_logs=False),
-                }
-                return
-            if payload.get("type") == "error":
-                outcome = ExecutionOutcome(
-                    ok=False,
-                    language=language,
-                    execution_id=execution_id,
-                    started_at=payload.get("started_at"),
-                    ended_at=payload.get("ended_at"),
-                    duration_ms=payload.get("duration_ms"),
-                    error=payload.get("error"),
-                    error_type=payload.get("error"),
-                    detail=payload.get("detail"),
-                )
-                yield {
-                    "event": "error",
-                    "data": outcome.to_response_dict(include_logs=False),
-                }
-                return
-
-        if kind == "timeout":
-            yield {
-                "event": "error",
-                "data": {
-                    "ok": False,
-                    "execution_id": execution_id,
-                    "language": language,
-                    "error": "timeout",
-                    "error_type": "timeout",
-                    "detail": (payload or {}).get("detail"),
-                },
-            }
-            return
-
-        if kind == "runner_crash":
-            yield {
-                "event": "error",
-                "data": {
-                    "ok": False,
-                    "execution_id": execution_id,
-                    "language": language,
-                    "error": (payload or {}).get("error", "runner_failed"),
-                    "error_type": "runner_failed",
-                    "detail": (payload or {}).get("detail"),
-                    "exit_code": (payload or {}).get("exit_code"),
-                },
-            }
-            return
-
-    yield {
-        "event": "error",
-        "data": {
-            "ok": False,
-            "execution_id": execution_id,
-            "language": language,
-            "error": "no_result",
-            "error_type": "no_result",
-            "detail": "Runner finished without a completion event",
-        },
-    }

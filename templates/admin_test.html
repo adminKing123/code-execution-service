@@ -42,10 +42,14 @@ def main():
 </textarea>
       </div>
       <div class="form-row">
+        <label for="stdin_lines">stdin_lines (one per line for input())</label>
+        <textarea id="stdin_lines" name="stdin_lines" style="min-height:60px;font-family:var(--mono);" placeholder="optional"></textarea>
+      </div>
+      <div class="form-row">
         <label><input id="include_logs" type="checkbox" checked> Include logs in JSON response</label>
       </div>
       <div class="form-row">
-        <label><input id="stream" type="checkbox"> Stream logs (SSE)</label>
+        <label><input id="stream" type="checkbox"> stream (same as include_logs)</label>
       </div>
       <div class="form-row">
         <button type="submit" class="default" id="run-btn"><i class="bi bi-play-fill"></i> Run code</button>
@@ -53,7 +57,6 @@ def main():
       </div>
     </form>
     <div id="result" class="result-box" hidden></div>
-    <div id="sse-log" class="result-box" hidden style="margin-top:0.5rem;max-height:240px;overflow:auto;"></div>
   </div>
 </div>
 
@@ -74,88 +77,39 @@ def main():
 
   const form = document.getElementById("test-form");
   const result = document.getElementById("result");
-  const sseLog = document.getElementById("sse-log");
   const runBtn = document.getElementById("run-btn");
 
   form.addEventListener("submit", async function (event) {
     event.preventDefault();
     runBtn.disabled = true;
     result.hidden = false;
-    sseLog.hidden = true;
     result.className = "result-box";
     result.textContent = "Running…";
-    sseLog.textContent = "";
+
+    const stdinRaw = document.getElementById("stdin_lines").value;
+    const stdin_lines = stdinRaw.trim()
+      ? stdinRaw.split(/\r?\n/).filter(function (line) { return line.length > 0; })
+      : [];
 
     const payload = {
       language: document.getElementById("language").value,
       code: document.getElementById("code").value,
       include_logs: document.getElementById("include_logs").checked,
-      stream: document.getElementById("stream").checked
+      stream: document.getElementById("stream").checked,
+      stdin_lines: stdin_lines
     };
 
     try {
-      if (payload.stream) {
-        sseLog.hidden = false;
-        const response = await fetch(apiUrl + "?stream=true", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + apiKey,
-            "Accept": "text/event-stream"
-          },
-          body: JSON.stringify(payload)
-        });
-        if (!response.ok || !response.body) {
-          const errBody = await response.json().catch(function () { return {}; });
-          result.classList.add("err");
-          result.textContent = JSON.stringify({ status: response.status, body: errBody }, null, 2);
-          return;
-        }
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let finalPayload = null;
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const parts = buffer.split("\n\n");
-          buffer = parts.pop() || "";
-          parts.forEach(function (block) {
-            const lines = block.split("\n");
-            let ev = "message";
-            let data = "";
-            lines.forEach(function (line) {
-              if (line.startsWith("event:")) ev = line.slice(6).trim();
-              if (line.startsWith("data:")) data = line.slice(5).trim();
-            });
-            if (!data) return;
-            try {
-              const parsed = JSON.parse(data);
-              if (ev === "log") {
-                sseLog.textContent += "[" + (parsed.stream || "?") + "] " + (parsed.message || "") + "\n";
-              }
-              if (ev === "complete" || ev === "error") finalPayload = { event: ev, data: parsed };
-            } catch (_) {}
-          });
-        }
-        result.textContent = JSON.stringify(finalPayload || { note: "stream ended" }, null, 2);
-        result.classList.add(finalPayload && finalPayload.event === "complete" ? "ok" : "err");
-        if (finalPayload && finalPayload.data && finalPayload.data.log_id) {
-          result.textContent += "\n\nView log: " + window.location.origin + "/admin/logs/" + finalPayload.data.log_id;
-        }
-      } else {
-        const response = await fetch(apiUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + apiKey },
-          body: JSON.stringify(payload)
-        });
-        const data = await response.json().catch(function () { return {}; });
-        result.textContent = JSON.stringify({ status: response.status, body: data }, null, 2);
-        result.classList.add(response.ok && data.ok ? "ok" : "err");
-        if (data.log_id) {
-          result.textContent += "\n\nView log: " + window.location.origin + "/admin/logs/" + data.log_id;
-        }
+      const response = await fetch(apiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + apiKey },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json().catch(function () { return {}; });
+      result.textContent = JSON.stringify({ status: response.status, body: data }, null, 2);
+      result.classList.add(response.ok && data.ok ? "ok" : "err");
+      if (data.log_id) {
+        result.textContent += "\n\nView log: " + window.location.origin + "/admin/logs/" + data.log_id;
       }
     } catch (err) {
       result.classList.add("err");

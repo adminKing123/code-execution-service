@@ -1,13 +1,12 @@
-import json
 import secrets
 from functools import wraps
 
-from flask import Flask, Response, jsonify, render_template, request, stream_with_context
+from flask import Flask, jsonify, render_template, request
 
 import config
 import settings_store
 from admin_routes import admin_bp
-from code_executor import ExecutionValidationError, execute_code, stream_execute_code
+from code_executor import ExecutionValidationError, _normalize_stdin_lines, execute_code
 from database import init_db
 from execution_logging import create_execution_log, finalize_execution_log, record_failed_execution
 from languages import list_languages
@@ -44,22 +43,15 @@ def _client_ip() -> str | None:
     return request.remote_addr
 
 
-def _parse_stream_flag(data: dict | None) -> bool:
-    if data and "stream" in data:
-        value = data["stream"]
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.lower() in ("1", "true", "yes", "on")
-        raise TypeError("stream must be a boolean")
-    if request.args.get("stream", "").lower() in ("1", "true", "yes", "on"):
-        return True
-    accept = request.headers.get("Accept", "")
-    return "text/event-stream" in accept
-
-
-def _sse_format(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+def _bool_field(data: dict, key: str) -> bool:
+    if key not in data:
+        return False
+    value = data[key]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ("1", "true", "yes", "on")
+    raise TypeError(f"{key} must be a boolean")
 
 
 def _validation_fail(data: dict | None, error: str):
@@ -101,89 +93,26 @@ def api_execute():
             raise ExecutionValidationError("code is required")
         if not isinstance(code, str):
             raise TypeError("code must be a string")
-        stream = _parse_stream_flag(data)
-        include_logs = bool(data.get("include_logs", False))
+        stdin_lines = _normalize_stdin_lines(data.get("stdin_lines"))
+        include_logs = _bool_field(data, "include_logs") or _bool_field(data, "stream")
     except (TypeError, ExecutionValidationError) as exc:
         return _validation_fail(data, str(exc))
 
     client_ip = _client_ip()
 
-    if stream:
-        try:
-            log_id, execution_id = create_execution_log(
-                language=language,
-                code=code,
-                streamed=True,
-                client_ip=client_ip,
-            )
-        except Exception as exc:
-            return jsonify({"ok": False, "error": str(exc), "error_type": "internal"}), 500
-
-        @stream_with_context
-        def event_stream():
-            collected_logs: list[dict] = []
-            final_payload: dict | None = None
-            final_ok = False
-
-            try:
-                for item in stream_execute_code(
-                    language=language, code=code, execution_id=execution_id
-                ):
-                    event = item["event"]
-                    payload = dict(item["data"])
-
-                    if event == "started":
-                        payload["log_id"] = log_id
-                    if event == "log":
-                        collected_logs.append(payload)
-                    if event in ("complete", "error"):
-                        payload["log_id"] = log_id
-                        final_payload = payload
-                        final_ok = event == "complete" and payload.get("ok") is not False
-
-                    yield _sse_format(event, payload)
-            finally:
-                if final_payload:
-                    finalize_execution_log(
-                        log_id,
-                        ok=final_ok,
-                        has_main=final_payload.get("has_main"),
-                        result=final_payload.get("result"),
-                        started_at=final_payload.get("started_at"),
-                        ended_at=final_payload.get("ended_at"),
-                        duration_ms=final_payload.get("duration_ms"),
-                        error_detail=final_payload.get("error") or final_payload.get("detail"),
-                        error_type=final_payload.get("error_type") or final_payload.get("error"),
-                        logs=collected_logs,
-                        store_logs=bool(collected_logs),
-                    )
-                else:
-                    finalize_execution_log(
-                        log_id,
-                        ok=False,
-                        error_detail="Stream ended without completion",
-                        error_type="stream_incomplete",
-                        logs=collected_logs,
-                        store_logs=bool(collected_logs),
-                    )
-
-        return Response(
-            event_stream(),
-            mimetype="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
     try:
         log_id, execution_id = create_execution_log(
             language=language,
             code=code,
-            streamed=False,
+            streamed=include_logs,
             client_ip=client_ip,
         )
-        outcome = execute_code(language=language, code=code, execution_id=execution_id)
+        outcome = execute_code(
+            language=language,
+            code=code,
+            execution_id=execution_id,
+            stdin_lines=stdin_lines,
+        )
     except ExecutionValidationError as exc:
         return _validation_fail(data, str(exc))
 
