@@ -46,11 +46,54 @@ def _resolve_python_executable() -> str:
 PYTHON_EXECUTABLE = _resolve_python_executable()
 
 
-def _resolve_node_executable() -> str:
+def _nvm_node_candidates() -> list[str]:
+    nvm_root = Path.home() / ".nvm" / "versions" / "node"
+    if not nvm_root.is_dir():
+        return []
+    found = sorted(nvm_root.glob("*/bin/node"), key=lambda p: p.parent.parent.name, reverse=True)
+    return [str(p) for p in found if p.is_file()]
+
+
+def _node_candidates() -> list[str]:
+    candidates: list[str] = []
     configured = (os.getenv("NODE_EXECUTABLE") or "").strip()
     if configured:
-        return configured
-    return shutil.which("node") or shutil.which("nodejs") or "node"
+        candidates.append(configured)
+    for name in ("node", "nodejs"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+    candidates.extend(_nvm_node_candidates())
+    candidates.extend(
+        str(p)
+        for p in (
+            Path("/usr/local/bin/node"),
+            Path("/usr/bin/node"),
+        )
+        if p.is_file()
+    )
+    unique: list[str] = []
+    for path in candidates:
+        if path and path not in unique:
+            unique.append(path)
+    return unique
 
 
-NODE_EXECUTABLE = _resolve_node_executable()
+def get_node_executable() -> str | None:
+    """Full path to node, or None if not found (uWSGI often has no node on PATH)."""
+    for path in _node_candidates():
+        if Path(path).is_file():
+            return path
+    return None
+
+
+def node_setup_hint() -> str:
+    return (
+        "JavaScript runtime not found. In a PythonAnywhere Bash console run: which node\n"
+        "Then set NODE_EXECUTABLE to that full path in your Web app environment variables "
+        "or .env and reload."
+    )
+
+
+# Back-compat alias for templates / languages
+NODE_EXECUTABLE = get_node_executable() or ""

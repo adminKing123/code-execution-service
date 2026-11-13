@@ -24,9 +24,12 @@ SUPPORTED = {
 
 
 def _node_version() -> str:
+    node = config.get_node_executable()
+    if not node:
+        return "not configured"
     try:
         proc = subprocess.run(
-            [config.NODE_EXECUTABLE, "-v"],
+            [node, "-v"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -46,8 +49,11 @@ def list_languages() -> list[dict]:
             item["runtime_executable"] = config.PYTHON_EXECUTABLE
             item["version"] = platform.python_version()
         elif item["id"] == "javascript":
-            item["runtime_executable"] = config.NODE_EXECUTABLE
+            node = config.get_node_executable()
+            item["runtime_executable"] = node or "(set NODE_EXECUTABLE)"
             item["version"] = _node_version()
+            if not node:
+                item["note"] = "Set NODE_EXECUTABLE to the output of `which node` on the server."
         items.append(item)
     return items
 

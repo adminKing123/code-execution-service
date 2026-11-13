@@ -104,6 +104,8 @@ def validate_execute_request(
         except PyGuardrailViolation as exc:
             raise ExecutionValidationError(str(exc)) from exc
     elif language == "javascript":
+        if not config.get_node_executable():
+            raise ExecutionValidationError(config.node_setup_hint())
         try:
             validate_javascript_source(code)
         except JsGuardrailViolation as exc:
@@ -254,13 +256,16 @@ def _run_for_language(language: str, code: str, *, stdin_lines: list[str] | None
             },
         )
     if language == "javascript":
+        node = config.get_node_executable()
+        if not node:
+            raise ExecutionValidationError(config.node_setup_hint())
         return _run_subprocess(
-            interpreter=config.NODE_EXECUTABLE,
+            interpreter=node,
             runner_args=[str(JS_RUNNER_PATH)],
             code=code,
             code_filename="user_code.js",
             stdin_lines=stdin_lines,
-            interpreter_label=config.NODE_EXECUTABLE,
+            interpreter_label=node,
         )
     raise ExecutionValidationError(f"Unsupported language: {language}")
 
