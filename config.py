@@ -44,3 +44,13 @@ def _resolve_python_executable() -> str:
 
 
 PYTHON_EXECUTABLE = _resolve_python_executable()
+
+
+def _resolve_node_executable() -> str:
+    configured = (os.getenv("NODE_EXECUTABLE") or "").strip()
+    if configured:
+        return configured
+    return shutil.which("node") or shutil.which("nodejs") or "node"
+
+
+NODE_EXECUTABLE = _resolve_node_executable()

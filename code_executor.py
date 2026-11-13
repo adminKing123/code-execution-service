@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -15,10 +15,14 @@ from pathlib import Path
 
 import config
 import settings_store
+from javascript_guardrails import GuardrailViolation as JsGuardrailViolation
+from javascript_guardrails import validate_javascript_source
 from languages import get_language
-from python_guardrails import GuardrailViolation, validate_python_source
+from python_guardrails import GuardrailViolation as PyGuardrailViolation
+from python_guardrails import validate_python_source
 
-RUNNER_PATH = Path(__file__).resolve().parent / "python_runner.py"
+PYTHON_RUNNER_PATH = Path(__file__).resolve().parent / "python_runner.py"
+JS_RUNNER_PATH = Path(__file__).resolve().parent / "javascript_runner.js"
 
 
 class ExecutionValidationError(ValueError):
@@ -97,7 +101,12 @@ def validate_execute_request(
     if language == "python":
         try:
             validate_python_source(code)
-        except GuardrailViolation as exc:
+        except PyGuardrailViolation as exc:
+            raise ExecutionValidationError(str(exc)) from exc
+    elif language == "javascript":
+        try:
+            validate_javascript_source(code)
+        except JsGuardrailViolation as exc:
             raise ExecutionValidationError(str(exc)) from exc
 
 
@@ -116,28 +125,38 @@ def _parse_protocol_line(line: str) -> dict | None:
     return {"type": "log", "stream": "stdout", "message": line}
 
 
-def _run_python_subprocess(code: str, *, stdin_lines: list[str] | None = None) -> Iterable[tuple[str, dict | None]]:
-    """
-    Yields ("event", payload) for each protocol message from the child process.
-    """
+def _run_subprocess(
+    *,
+    interpreter: str,
+    runner_args: list[str],
+    code: str,
+    code_filename: str,
+    stdin_lines: list[str] | None,
+    interpreter_label: str,
+    extra_env: dict[str, str] | None = None,
+) -> Iterable[tuple[str, dict | None]]:
     with tempfile.TemporaryDirectory(prefix="code-exec-") as tmp:
-        code_path = Path(tmp) / "user_code.py"
+        code_path = Path(tmp) / code_filename
         code_path.write_text(code, encoding="utf-8")
         stdin_path = Path(tmp) / "stdin_lines.json"
         stdin_path.write_text(json.dumps(stdin_lines or []), encoding="utf-8")
 
+        timeout = settings_store.execution_timeout_seconds()
+        run_env = {
+            **{k: v for k, v in os.environ.items()},
+            "CE_RUN_TIMEOUT_MS": str(int(timeout * 1000)),
+            **(extra_env or {}),
+        }
+
+        cmd = [interpreter, *runner_args, str(code_path), str(stdin_path)]
         proc = subprocess.Popen(
-            [config.PYTHON_EXECUTABLE, str(RUNNER_PATH), str(code_path), str(stdin_path)],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
             cwd=tmp,
-            env={
-                **{k: v for k, v in __import__("os").environ.items()},
-                "PYTHONNOUSERSITE": "1",
-                "PYTHONDONTWRITEBYTECODE": "1",
-            },
+            env=run_env,
         )
 
         assert proc.stdout is not None
@@ -151,7 +170,6 @@ def _run_python_subprocess(code: str, *, stdin_lines: list[str] | None = None) -
                 line_queue.put(None)
 
         threading.Thread(target=_stdout_reader, daemon=True).start()
-        timeout = settings_store.execution_timeout_seconds()
         deadline = time.monotonic() + timeout
         timed_out = False
         saw_terminal_event = False
@@ -200,7 +218,7 @@ def _run_python_subprocess(code: str, *, stdin_lines: list[str] | None = None) -
                 detail_parts.append(stderr_tail.strip())
             detail_parts.append(
                 f"Child exited with code {proc.returncode} and no completion event "
-                f"(interpreter: {config.PYTHON_EXECUTABLE})"
+                f"(interpreter: {interpreter_label})"
             )
             yield (
                 "runner_crash",
@@ -219,6 +237,32 @@ def _run_python_subprocess(code: str, *, stdin_lines: list[str] | None = None) -
                     "exit_code": proc.returncode,
                 },
             )
+
+
+def _run_for_language(language: str, code: str, *, stdin_lines: list[str] | None) -> Iterable[tuple[str, dict | None]]:
+    if language == "python":
+        return _run_subprocess(
+            interpreter=config.PYTHON_EXECUTABLE,
+            runner_args=[str(PYTHON_RUNNER_PATH)],
+            code=code,
+            code_filename="user_code.py",
+            stdin_lines=stdin_lines,
+            interpreter_label=config.PYTHON_EXECUTABLE,
+            extra_env={
+                "PYTHONNOUSERSITE": "1",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+        )
+    if language == "javascript":
+        return _run_subprocess(
+            interpreter=config.NODE_EXECUTABLE,
+            runner_args=[str(JS_RUNNER_PATH)],
+            code=code,
+            code_filename="user_code.js",
+            stdin_lines=stdin_lines,
+            interpreter_label=config.NODE_EXECUTABLE,
+        )
+    raise ExecutionValidationError(f"Unsupported language: {language}")
 
 
 def _outcome_from_complete(
@@ -244,25 +288,17 @@ def _outcome_from_complete(
     )
 
 
-def execute_code(
+def _collect_outcome(
     *,
     language: str,
+    execution_id: str,
+    stdin_lines: list[str],
     code: str,
-    execution_id: str | None = None,
-    stdin_lines: list[str] | None = None,
 ) -> ExecutionOutcome:
-    execution_id = execution_id or str(uuid.uuid4())
-    stdin_lines = stdin_lines or []
-    validate_execute_request(language=language, code=code, stdin_lines=stdin_lines)
-
     logs: list[dict] = []
     started_at = _utc_request_started()
-    ended_at: str | None = None
-    duration_ms: int | None = None
-    has_main: bool | None = None
-    result = None
 
-    for kind, payload in _run_python_subprocess(code, stdin_lines=stdin_lines):
+    for kind, payload in _run_for_language(language, code, stdin_lines=stdin_lines):
         if kind == "protocol" and payload:
             if payload.get("type") == "log":
                 logs.append(payload)
@@ -328,4 +364,22 @@ def execute_code(
         error_type="no_result",
         detail="Runner finished without a completion event",
         logs=logs,
+    )
+
+
+def execute_code(
+    *,
+    language: str,
+    code: str,
+    execution_id: str | None = None,
+    stdin_lines: list[str] | None = None,
+) -> ExecutionOutcome:
+    execution_id = execution_id or str(uuid.uuid4())
+    stdin_lines = stdin_lines or []
+    validate_execute_request(language=language, code=code, stdin_lines=stdin_lines)
+    return _collect_outcome(
+        language=language,
+        execution_id=execution_id,
+        stdin_lines=stdin_lines,
+        code=code,
     )

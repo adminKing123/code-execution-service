@@ -61,7 +61,7 @@ def _log_filters_from_request() -> dict:
     if status not in ("all", "success", "failed"):
         status = "all"
     language = request.args.get("language", "all").lower()
-    if language not in ("all", "python"):
+    if language not in ("all", "python", "javascript"):
         language = "all"
     return {
         "status": status,

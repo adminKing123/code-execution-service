@@ -1,7 +1,7 @@
 {% extends "docs_public_layout.html" %}
 {% block doc_content %}
 <h1><i class="bi bi-terminal"></i> Code Execution Service API</h1>
-<p class="subtitle">Run Python in an isolated subprocess. Every run is logged in the admin console.</p>
+<p class="subtitle">Run Python or JavaScript in isolated subprocesses. Every run is logged in the admin console.</p>
 
 <div class="doc-callout">
   <strong>Base URL:</strong> <code>http://{{ flask_host }}:{{ flask_port }}</code>
@@ -24,15 +24,15 @@
 <table class="doc-table">
   <thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
   <tbody>
-    <tr><td><code>language</code></td><td>string</td><td>No</td><td>Default <code>python</code>.</td></tr>
+    <tr><td><code>language</code></td><td>string</td><td>No</td><td><code>python</code> (default) or <code>javascript</code>.</td></tr>
     <tr><td><code>code</code></td><td>string</td><td>Yes</td><td>Source. Max {{ max_code_kb }} KB (Settings).</td></tr>
-    <tr><td><code>stdin_lines</code></td><td>string[]</td><td>No</td><td>Lines consumed by each <code>input()</code> call, in order.</td></tr>
-    <tr><td><code>include_logs</code></td><td>boolean</td><td>No</td><td>Include captured <code>print</code> output in JSON <code>logs</code>.</td></tr>
+    <tr><td><code>stdin_lines</code></td><td>string[]</td><td>No</td><td>Lines for each <code>input()</code> call (Python or JS).</td></tr>
+    <tr><td><code>include_logs</code></td><td>boolean</td><td>No</td><td>Include <code>print</code> / <code>console.log</code> lines in JSON <code>logs</code>.</td></tr>
     <tr><td><code>stream</code></td><td>boolean</td><td>No</td><td>Alias for <code>include_logs</code> (response is always JSON).</td></tr>
   </tbody>
 </table>
 <p>Timeout: {{ execution_timeout_seconds }} seconds (Settings).</p>
-<p>Successful run with no <code>main()</code>, or <code>main()</code> returning <code>null</code>, returns <code>ok: true</code> and HTTP <code>200</code>. Guardrails block risky imports and <code>open</code>/<code>exec</code>/<code>eval</code>.</p>
+<p>Entry point: Python <code>def main():</code> or JavaScript <code>function main()</code> (async allowed). No main, or main returning <code>null</code>/<code>undefined</code>, still returns <code>ok: true</code> and HTTP <code>200</code>. Guardrails block dangerous modules, <code>require</code>, <code>eval</code>, network, etc.</p>
 
 <h2>Responses</h2>
 <table class="doc-table">
@@ -57,6 +57,13 @@
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_SERVICE_API_KEY" \
   -d "{\"language\":\"python\",\"code\":\"def main(): return 1\",\"include_logs\":true}"</pre>
+
+<h2>Example — JavaScript</h2>
+<pre class="doc-pre">{
+  "language": "javascript",
+  "code": "console.log('hi');\nfunction main() { return { sum: 1 + 2 }; }",
+  "include_logs": true
+}</pre>
 
 <h2>Example — <code>main()</code> optional</h2>
 <pre class="doc-pre">{
