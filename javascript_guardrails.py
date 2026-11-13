@@ -29,7 +29,7 @@ class GuardrailViolation(ValueError):
 
 
 def validate_javascript_source(source: str) -> None:
-    if not source.strip():
+    if not source or len(source) == 0:
         raise GuardrailViolation("code is required")
     for pattern, message in BLOCKED_PATTERNS:
         if pattern.search(source):

@@ -90,7 +90,9 @@ def validate_execute_request(
 ) -> None:
     if not get_language(language):
         raise ExecutionValidationError(f"Unsupported language: {language}")
-    if not isinstance(code, str) or not code.strip():
+    if not isinstance(code, str):
+        raise ExecutionValidationError("code is required")
+    if len(code) == 0:
         raise ExecutionValidationError("code is required")
     encoded = code.encode("utf-8")
     max_bytes = settings_store.max_code_bytes()
