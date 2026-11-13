@@ -1,0 +1,169 @@
+{% extends "admin_layout.html" %}
+{% block title %}Test run · Code Execution Admin{% endblock %}
+{% block breadcrumb_trail %}
+<span class="sep">›</span> Test run
+{% endblock %}
+{% block page_header %}
+<h1><i class="bi bi-play-circle"></i> Test run</h1>
+<p class="subtitle">POST to <code>/api/execute</code> with the service API key — same path your application uses.</p>
+{% endblock %}
+{% block content %}
+
+<div class="module">
+  <h2><i class="bi bi-shield-lock"></i> Service API key</h2>
+  <div class="module-inner">
+    <p class="help" style="margin-top:0;">Use header <code>Authorization: Bearer …</code> or <code>X-API-Key</code>.</p>
+    <p class="help">Limits: <strong>{{ max_code_kb }} KB</strong> max code, <strong>{{ execution_timeout_seconds }}s</strong> timeout —
+      <a href="{{ url_for('admin.settings_page') }}"><i class="bi bi-gear"></i> Settings</a></p>
+    <div class="key-row">
+      <code class="key-display" id="key-masked">{{ api_key_masked }}</code>
+      <button type="button" class="button-secondary" id="copy-key-btn"><i class="bi bi-clipboard"></i> Copy key</button>
+      <span style="color:var(--muted);" id="copy-key-status" aria-live="polite"></span>
+    </div>
+  </div>
+</div>
+
+<div class="module">
+  <h2><i class="bi bi-code-square"></i> Run test code</h2>
+  <div class="module-inner">
+    <form id="test-form">
+      <div class="form-row">
+        <label for="language">Language</label>
+        <select id="language" name="language">
+          <option value="python" selected>python</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label for="code">Code</label>
+        <textarea id="code" name="code" required style="min-height:200px;font-family:var(--mono);">print("hello from admin test")
+
+def main():
+    return {"ok": True, "answer": 42}
+</textarea>
+      </div>
+      <div class="form-row">
+        <label><input id="include_logs" type="checkbox" checked> Include logs in JSON response</label>
+      </div>
+      <div class="form-row">
+        <label><input id="stream" type="checkbox"> Stream logs (SSE)</label>
+      </div>
+      <div class="form-row">
+        <button type="submit" class="default" id="run-btn"><i class="bi bi-play-fill"></i> Run code</button>
+        <span style="margin-left:10px;color:var(--muted);">→ {{ api_url }}</span>
+      </div>
+    </form>
+    <div id="result" class="result-box" hidden></div>
+    <div id="sse-log" class="result-box" hidden style="margin-top:0.5rem;max-height:240px;overflow:auto;"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const apiKey = {{ api_key | tojson }};
+  const apiUrl = {{ api_url | tojson }};
+  document.getElementById("copy-key-btn").addEventListener("click", async function () {
+    const status = document.getElementById("copy-key-status");
+    try {
+      await navigator.clipboard.writeText(apiKey);
+      status.textContent = "Copied.";
+      setTimeout(function () { status.textContent = ""; }, 2500);
+    } catch (e) {
+      status.textContent = "Copy failed.";
+    }
+  });
+
+  const form = document.getElementById("test-form");
+  const result = document.getElementById("result");
+  const sseLog = document.getElementById("sse-log");
+  const runBtn = document.getElementById("run-btn");
+
+  form.addEventListener("submit", async function (event) {
+    event.preventDefault();
+    runBtn.disabled = true;
+    result.hidden = false;
+    sseLog.hidden = true;
+    result.className = "result-box";
+    result.textContent = "Running…";
+    sseLog.textContent = "";
+
+    const payload = {
+      language: document.getElementById("language").value,
+      code: document.getElementById("code").value,
+      include_logs: document.getElementById("include_logs").checked,
+      stream: document.getElementById("stream").checked
+    };
+
+    try {
+      if (payload.stream) {
+        sseLog.hidden = false;
+        const response = await fetch(apiUrl + "?stream=true", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + apiKey,
+            "Accept": "text/event-stream"
+          },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok || !response.body) {
+          const errBody = await response.json().catch(function () { return {}; });
+          result.classList.add("err");
+          result.textContent = JSON.stringify({ status: response.status, body: errBody }, null, 2);
+          return;
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let finalPayload = null;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() || "";
+          parts.forEach(function (block) {
+            const lines = block.split("\n");
+            let ev = "message";
+            let data = "";
+            lines.forEach(function (line) {
+              if (line.startsWith("event:")) ev = line.slice(6).trim();
+              if (line.startsWith("data:")) data = line.slice(5).trim();
+            });
+            if (!data) return;
+            try {
+              const parsed = JSON.parse(data);
+              if (ev === "log") {
+                sseLog.textContent += "[" + (parsed.stream || "?") + "] " + (parsed.message || "") + "\n";
+              }
+              if (ev === "complete" || ev === "error") finalPayload = { event: ev, data: parsed };
+            } catch (_) {}
+          });
+        }
+        result.textContent = JSON.stringify(finalPayload || { note: "stream ended" }, null, 2);
+        result.classList.add(finalPayload && finalPayload.event === "complete" ? "ok" : "err");
+        if (finalPayload && finalPayload.data && finalPayload.data.log_id) {
+          result.textContent += "\n\nView log: " + window.location.origin + "/admin/logs/" + finalPayload.data.log_id;
+        }
+      } else {
+        const response = await fetch(apiUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + apiKey },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json().catch(function () { return {}; });
+        result.textContent = JSON.stringify({ status: response.status, body: data }, null, 2);
+        result.classList.add(response.ok && data.ok ? "ok" : "err");
+        if (data.log_id) {
+          result.textContent += "\n\nView log: " + window.location.origin + "/admin/logs/" + data.log_id;
+        }
+      }
+    } catch (err) {
+      result.classList.add("err");
+      result.textContent = String(err);
+    } finally {
+      runBtn.disabled = false;
+    }
+  });
+})();
+</script>
+{% endblock %}

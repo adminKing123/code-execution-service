@@ -1,0 +1,64 @@
+{% extends "admin_layout.html" %}
+{% block title %}Execution log #{{ log.id }} · Admin{% endblock %}
+{% block breadcrumb_trail %}
+<span class="sep">›</span> <a href="{{ url_for('admin.dashboard') }}">Execution logs</a>
+<span class="sep">›</span> #{{ log.id }}
+{% endblock %}
+{% block page_header %}
+<ul class="object-tools">
+  <li><a href="{{ url_for('admin.dashboard') }}" class="button-secondary"><i class="bi bi-arrow-left"></i> Back to list</a></li>
+</ul>
+<h1><i class="bi bi-terminal"></i> Execution log #{{ log.id }}</h1>
+<p class="subtitle">Read-only record of one API execution.</p>
+{% endblock %}
+{% block content %}
+
+<div class="module">
+  <h2>Summary</h2>
+  <div class="module-inner">
+    <dl class="detail-grid">
+      <dt><i class="bi bi-clock"></i> Recorded</dt><dd>{{ log.created_at }}</dd>
+      <dt>Status</dt>
+      <dd>
+        <span class="status-badge {{ log.status }}">
+          {% if log.status == 'success' %}<i class="bi bi-check-lg"></i>{% else %}<i class="bi bi-exclamation-lg"></i>{% endif %}
+          {{ log.status }}
+        </span>
+      </dt>
+      <dt>Language</dt><dd><code>{{ log.language }}</code></dd>
+      <dt>Execution ID</dt><dd><code>{{ log.execution_id }}</code></dd>
+      <dt>Has main()</dt><dd>{% if log.has_main is none %}—{% elif log.has_main %}Yes{% else %}No{% endif %}</dd>
+      <dt>SSE stream</dt><dd>{{ 'Yes' if log.streamed else 'No' }}</dd>
+      <dt>Code size</dt><dd>{{ log.code_bytes }} bytes</dd>
+      <dt>Run started</dt><dd>{{ log.started_at or '—' }}</dd>
+      <dt>Run ended</dt><dd>{{ log.ended_at or '—' }}</dd>
+      <dt>Duration</dt><dd>{% if log.duration_display %}{{ log.duration_display }}{% else %}—{% endif %}</dd>
+      <dt><i class="bi bi-globe"></i> Client IP</dt><dd>{{ log.client_ip or '—' }}</dd>
+      {% if log.result is not none %}
+      <dt>Result</dt><dd><pre class="body-block" style="max-height:200px;margin:0;">{{ log.result | tojson(indent=2) }}</pre></dd>
+      {% endif %}
+      {% if log.error_detail %}
+      <dt><i class="bi bi-bug"></i> Error</dt>
+      <dd class="text-error" style="font-weight:500;">{% if log.error_type %}<code>{{ log.error_type }}</code> — {% endif %}{{ log.error_detail }}</dd>
+      {% endif %}
+    </dl>
+  </div>
+</div>
+
+<div class="module">
+  <h2>Source code</h2>
+  <div class="module-inner">
+    <pre class="body-block">{{ log.code }}</pre>
+  </div>
+</div>
+
+{% if log.logs %}
+<div class="module">
+  <h2>Captured logs</h2>
+  <div class="module-inner">
+    <pre class="body-block">{% for entry in log.logs %}[{{ entry.stream }}] {{ entry.message }}
+{% endfor %}</pre>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

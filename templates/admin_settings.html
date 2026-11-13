@@ -1,0 +1,53 @@
+{% extends "admin_layout.html" %}
+{% block title %}Settings · Code Execution Admin{% endblock %}
+{% block breadcrumb_trail %}
+<span class="sep">›</span> Settings
+{% endblock %}
+{% block page_header %}
+<h1><i class="bi bi-gear"></i> Settings</h1>
+<p class="subtitle">Execution limits for the run API. Saved values apply immediately.</p>
+{% endblock %}
+{% block content %}
+
+{% if saved %}
+<ul class="messagelist"><li class="success"><i class="bi bi-check-circle"></i> Settings saved successfully.</li></ul>
+{% endif %}
+{% if errors %}
+<ul class="messagelist">
+  <li class="error">
+    <strong><i class="bi bi-exclamation-triangle"></i> Could not save</strong>
+    <ul style="margin:6px 0 0;">{% for err in errors %}<li>{{ err }}</li>{% endfor %}</ul>
+  </li>
+</ul>
+{% endif %}
+
+<form method="post" class="module">
+  <h2>Configuration</h2>
+  <div class="module-inner">
+    <fieldset class="module aligned">
+      <h3 style="font-size:0.95rem;margin:0 0 12px;color:var(--text-secondary);"><i class="bi bi-lightning"></i> Execution</h3>
+      {% for field in fields if field.group == 'execution' %}
+      <div class="form-row">
+        <label for="{{ field.key }}">{{ field.label }}</label>
+        {% if field.display_unit == 'kb' %}
+        <input id="{{ field.key }}" name="{{ field.key }}" type="number" step="0.5" min="1" value="{{ values[field.key] }}" required>
+        {% else %}
+        <input id="{{ field.key }}" name="{{ field.key }}" type="number" step="1" min="5" max="600" value="{{ values[field.key] }}" required>
+        {% endif %}
+        <p class="help">{{ field.help }}</p>
+      </div>
+      {% endfor %}
+      <div class="form-row" style="margin-top:20px;">
+        <button type="submit" class="default"><i class="bi bi-save"></i> Save settings</button>
+      </div>
+    </fieldset>
+  </div>
+</form>
+
+<div class="module">
+  <h2><i class="bi bi-hdd-network"></i> Environment (read-only)</h2>
+  <div class="module-inner">
+    <p class="help" style="margin-top:0;">Service API key and admin password are set in <code>.env</code> only.</p>
+  </div>
+</div>
+{% endblock %}
